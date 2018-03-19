@@ -1,5 +1,5 @@
-blimpy (1.1.6.1-1kern1) UNRELEASED; urgency=low
+blimpy (1.1.6.1-1kern1) bionic; urgency=medium
 
   * Initial release.
 
- -- KERN packaging <packaging@kernsuite.info>  Mon, 19 Mar 2018 08:08:41 +0000
+ -- KERN packaging <packaging@kernsuite.info>  Mon, 19 Mar 2018 09:32:11 +0000
