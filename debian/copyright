@@ -1,0 +1,8 @@
+Format: http://www.debian.org/doc/packaging-manuals/copyright-format/1.0/
+Upstream-Name: blimpy
+Source: https://github.com/UCBerkeleySETI/blimpy
+
+Files: *
+Copyright: 2018 SETI
+License: MIT
+

@@ -1,0 +1,7 @@
+.debhelper/
+files
+*.debhelper.log
+*.substvars
+python-blimpy/
+python3-blimpy/
+tmp/
