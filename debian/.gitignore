@@ -5,3 +5,5 @@ files
 python-blimpy/
 python3-blimpy/
 tmp/
+blimpy/
+*.debhelper
