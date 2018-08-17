@@ -21,19 +21,22 @@ TODO: check the file seek logic works correctly for multiple IFs
 
 """
 
-import os
-import sys
-import struct
-import numpy as np
-from pprint import pprint
 
-from astropy import units as u
-from astropy.coordinates import Angle
+import sys
+import six
+
 from astropy.time import Time
 import scipy.stats
 from matplotlib.ticker import NullFormatter
 
-from .utils import db, lin, rebin, closest, unpack
+import logging as logger
+
+try:
+    from .utils import db, lin, rebin, closest, unpack_2to8
+    from .sigproc import *
+except:
+    from utils import db, lin, rebin, closest, unpack_2to8
+    from sigproc import *
 
 try:
     import h5py
@@ -47,8 +50,7 @@ try:
 except ImportError:
     HAS_SLALIB = False
 
-
-
+#import pdb #pdb.set_trace()
 
 # Check if $DISPLAY is set (for handling plotting on remote machines with no X-forwarding)
 if 'DISPLAY' in os.environ.keys():
@@ -58,8 +60,8 @@ else:
     matplotlib.use('Agg')
     import pylab as plt
 
+plt.rcParams['axes.formatter.useoffset'] = False
 
-from .sigproc import *
 
 ###
 # Config values
@@ -67,7 +69,7 @@ from .sigproc import *
 
 MAX_PLT_POINTS      = 65536                  # Max number of points in matplotlib plot
 MAX_IMSHOW_POINTS   = (8192, 4096)           # Max number of points in imshow plot
-MAX_DATA_ARRAY_SIZE = 1024 * 1024 * 1024     # Max size of data array to load into memory
+MAX_DATA_ARRAY_SIZE = 1024 * 1024 * 1024 * 2 # Max size of data array to load into memory
 MAX_HEADER_BLOCKS   = 100                    # Max size of header (in 512-byte blocks)
 
 
@@ -113,13 +115,20 @@ class Filterbank(object):
             self.filename = filename
             if HAS_HDF5:
                 if h5py.is_hdf5(filename):
+                    # TODO: self.read_hdf5(filename, f_start, f_stop, t_start, t_stop, load_data)
                     self.read_hdf5(filename, f_start, f_stop, t_start, t_stop, load_data)
                 else:
                     self.read_filterbank(filename, f_start, f_stop, t_start, t_stop, load_data)
             else:
                 self.read_filterbank(filename, f_start, f_stop, t_start, t_stop, load_data)
         elif header_dict is not None and data_array is not None:
-            self.gen_from_header(header_dict, data_array)
+            self.filename = b''
+            self.header = header_dict
+            self.data = data_array
+            self.n_ints_in_file = 0
+
+            self._setup_freqs()
+
         else:
             pass
 
@@ -132,22 +141,22 @@ class Filterbank(object):
             print("Calibrating the band pass.")
             self.calibrate_band_pass_N1()
 
-
-    def gen_from_header(self, header_dict, data_array, f_start=None, f_stop=None,
-                        t_start=None, t_stop=None, load_data=True):
-        self.filename = b''
-        self.header = header_dict
-        self.data = data_array
-        self.n_ints_in_file = 0
-
-        self._setup_freqs()
-
     def read_hdf5(self, filename, f_start=None, f_stop=None,
                         t_start=None, t_stop=None, load_data=True):
+        """ Populate Filterbank instance with data from HDF5 file
+
+        Note:
+            This is to be deprecated in future, please use Waterfall() to open files.
+        """
+        print("Warning: this function will be deprecated in the future. Please use Waterfall to open HDF5 files.")
+#        raise DeprecationWarning('Please use Waterfall to open HDF5 files.')
+
         self.header = {}
         self.filename = filename
         self.h5 = h5py.File(filename)
         for key, val in self.h5[b'data'].attrs.items():
+            if six.PY3:
+                key = bytes(key, 'ascii')
             if key == b'src_raj':
                 self.header[key] = Angle(val, unit='hr')
             elif key == b'src_dej':
@@ -155,28 +164,36 @@ class Filterbank(object):
             else:
                 self.header[key] = val
 
-        self.data = self.h5[b"data"][:]
-        self.n_ints_in_file  = self.data.shape[0]
-        self.file_size_bytes = os.path.getsize(self.filename)
+        self.n_ints_in_file = self.h5[b"data"].shape[0]
+        i_start, i_stop, chan_start_idx, chan_stop_idx = self._setup_freqs(f_start=f_start, f_stop=f_stop)
+        ii_start, ii_stop, n_ints = self._setup_time_axis(t_start=t_start, t_stop=t_stop)
 
-        self._setup_freqs()
-        self._setup_time_axis()
+        if load_data:
+            self.data = self.h5[b"data"][ii_start:ii_stop, :, chan_start_idx:chan_stop_idx]
 
-        if self.header['foff'] < 0:
-            self.data = self.data[..., ::-1] # Reverse data
+            self.file_size_bytes = os.path.getsize(self.filename)
 
+#         if self.header[b'foff'] < 0:
+#             self.data = self.data[..., ::-1] # Reverse data
+
+        else:
+            print("Skipping data load...")
+            self.data = np.array([0])
+            self.n_ints_in_file  = 0
+            self.file_size_bytes = os.path.getsize(self.filename)
 
 
     def _setup_freqs(self, f_start=None, f_stop=None):
+        """ Setup frequency axis """
         ## Setup frequency axis
         f0 = self.header[b'fch1']
         f_delt = self.header[b'foff']
 
         i_start, i_stop = 0, self.header[b'nchans']
         if f_start:
-            i_start = (f_start - f0) / f_delt
+            i_start = int((f_start - f0) / f_delt)
         if f_stop:
-            i_stop  = (f_stop - f0)  / f_delt
+            i_stop  = int((f_stop - f0)  / f_delt)
 
         #calculate closest true index value
         chan_start_idx = np.int(i_start)
@@ -190,14 +207,16 @@ class Filterbank(object):
 
         self.freqs = f_delt * i_vals + f0
 
-        if f_delt < 0:
-            self.freqs = self.freqs[::-1]
+#         if f_delt < 0:
+#             self.freqs = self.freqs[::-1]
+
+        if chan_stop_idx < chan_start_idx:
+            chan_stop_idx, chan_start_idx = chan_start_idx,chan_stop_idx
 
         return i_start, i_stop, chan_start_idx, chan_stop_idx
 
-    def _setup_time_axis(self,t_start=None, t_stop=None):
-        """  Setup time axis.
-        """
+    def _setup_time_axis(self, t_start=None, t_stop=None):
+        """  Setup time axis. """
 
         # now check to see how many integrations requested
         ii_start, ii_stop = 0, self.n_ints_in_file
@@ -213,9 +232,15 @@ class Filterbank(object):
 
         self.timestamps = np.arange(0, n_ints) * t_delt / 24./60./60 + t0
 
+        return ii_start, ii_stop, n_ints
+
     def read_filterbank(self, filename=None, f_start=None, f_stop=None,
                         t_start=None, t_stop=None, load_data=True):
+        """ Populate Filterbank instance with data from Filterbank file
 
+        Note:
+            This is to be deprecated in future, please use Waterfall() to open files.
+        """
         if filename is None:
             filename = self.filename
         else:
@@ -223,23 +248,14 @@ class Filterbank(object):
 
         self.header = read_header(filename)
 
-        ## Setup frequency axis
-        f0 = self.header[b'fch1']
-        f_delt = self.header[b'foff']
-
-        # keep this seperate!
-        # file_freq_mapping =  np.arange(0, self.header['nchans'], 1, dtype='float64') * f_delt + f0
-
         #convert input frequencies into what their corresponding index would be
-
-        i_start, i_stop, chan_start_idx, chan_stop_idx = self._setup_freqs(f_start, f_stop)
+        i_start, i_stop, chan_start_idx, chan_stop_idx = self._setup_freqs(f_start=f_start, f_stop=f_stop)
 
         n_bits  = self.header[b'nbits']
         n_bytes  = int(self.header[b'nbits'] / 8)
         n_chans = self.header[b'nchans']
         n_chans_selected = self.freqs.shape[0]
         n_ifs   = self.header[b'nifs']
-
 
         # Load binary data
         self.idx_data = len_header(filename)
@@ -248,18 +264,15 @@ class Filterbank(object):
         filesize = os.path.getsize(self.filename)
         n_bytes_data = filesize - self.idx_data
 
-        n_ints_in_file = int(n_bytes_data / (n_bits * 8 * n_chans * n_ifs))
+        # Finally add some other info to the class as objects
+        self.n_ints_in_file  = calc_n_ints_in_file(self.filename)
+        self.file_size_bytes = filesize
 
-        # now check to see how many integrations requested
-        ii_start, ii_stop = 0, n_ints_in_file
-        if t_start:
-            ii_start = t_start
-        if t_stop:
-            ii_stop = t_stop
-        n_ints = ii_stop - ii_start
+        ## Setup time axis
+        ii_start, ii_stop, n_ints = self._setup_time_axis(t_start=t_start, t_stop=t_stop)
 
         # Seek to first integration
-        f.seek(ii_start * n_bytes * n_ifs * n_chans, 1)
+        f.seek(int(ii_start * n_bits * n_ifs * n_chans / 8), 1)
 
         # Set up indexes used in file read (taken out of loop for speed)
         i0 = np.min((chan_start_idx, chan_stop_idx))
@@ -272,16 +285,15 @@ class Filterbank(object):
         elif n_bytes == 4:
             dd_type = b'float32'
         elif n_bytes == 2:
-            dd_type = b'int16'
+            dd_type = b'uint16'
         elif n_bytes == 1:
-            dd_type = b'int8'
+            dd_type = b'uint8'
 
         if load_data:
 
             if n_ints * n_ifs * n_chans_selected > MAX_DATA_ARRAY_SIZE:
-                print("Error: data array is too large to load. Either select fewer")
-                print("points or manually increase MAX_DATA_ARRAY_SIZE.")
-                exit()
+                print("[Filterbank]  Error: data array is too large to load. Either select fewer points or manually increase MAX_DATA_ARRAY_SIZE. Large files are now handle with Waterfall .")
+                sys.exit()
 
             if n_bits == 2:
                 self.data = np.zeros((n_ints, n_ifs, n_chans_selected*4), dtype=dd_type)
@@ -301,11 +313,11 @@ class Filterbank(object):
                     dd = np.fromfile(f, count=n_chans_selected, dtype=dd_type)
 
                     # Reverse array if frequency axis is flipped
-                    if f_delt < 0:
-                        dd = dd[::-1]
+#                     if f_delt < 0:
+#                         dd = dd[::-1]
 
                     if n_bits == 2:
-                        dd = unpack(dd, 2)
+                        dd = unpack_2to8(dd)
                     self.data[ii, jj] = dd
 
                     f.seek(n_bytes * (n_chans - i1), 1)  # Seek to start of next block
@@ -313,27 +325,18 @@ class Filterbank(object):
             print("Skipping data load...")
             self.data = np.array([0], dtype=dd_type)
 
-        # Finally add some other info to the class as objects
-        self.n_ints_in_file  = n_ints_in_file
-        self.file_size_bytes = filesize
-
-        ## Setup time axis
-        t0 = self.header[b'tstart']
-        t_delt = self.header[b'tsamp']
-        self.timestamps = np.arange(0, n_ints) * t_delt / 24./60./60 + t0
-
     def compute_lst(self):
         """ Compute LST for observation """
-        if self.header['telescope_id'] == 6:
+        if self.header[b'telescope_id'] == 6:
             self.coords = gbt_coords
-        elif self.header['telescope_id'] == 4:
+        elif self.header[b'telescope_id'] == 4:
             self.coords = parkes_coords
         else:
             raise RuntimeError("Currently only Parkes and GBT supported")
         if HAS_SLALIB:
             # dut1 = (0.2 /3600.0) * np.pi/12.0
             dut1 = 0.0
-            mjd = self.header['tstart']
+            mjd = self.header[b'tstart']
             tellong = np.deg2rad(self.coords[1])
             last = s.sla_gmst(mjd) - tellong + s.sla_eqeqx(mjd) + dut1
             # lmst = s.sla_gmst(mjd) - tellong
@@ -348,9 +351,9 @@ class Filterbank(object):
         uses the MJD, RA and DEC of observation to compute
         along with the telescope location. Requires pyslalib
         """
-        ra = Angle(self.header['src_raj'], unit='hourangle')
-        dec = Angle(self.header['src_dej'], unit='degree')
-        mjdd = self.header['tstart']
+        ra = Angle(self.header[b'src_raj'], unit='hourangle')
+        dec = Angle(self.header[b'src_dej'], unit='degree')
+        mjdd = self.header[b'tstart']
         rarad = ra.to('radian').value
         dcrad = dec.to('radian').value
         last = self.compute_lst()
@@ -396,16 +399,27 @@ class Filterbank(object):
     def blank_dc(self, n_coarse_chan):
         """ Blank DC bins in coarse channels.
 
-        Note: currently only works if entire blimpy file is read
+        Note: currently only works if entire file is read
         """
-        n_chan = self.data.shape[2]
-        n_chan_per_coarse = n_chan / n_coarse_chan
 
-        mid_chan = n_chan_per_coarse / 2
+        if n_coarse_chan < 1:
+            logger.warning('Coarse channel number < 1, unable to blank DC bin.')
+            return None
 
-        for ii in range(0, n_coarse_chan-1):
+        if not n_coarse_chan % int(n_coarse_chan) == 0:
+            logger.warning('Selection does not contain an interger number of coarse channels, unable to blank DC bin.')
+            return None
+
+        n_coarse_chan = int(n_coarse_chan)
+
+        n_chan = self.data.shape[-1]
+        n_chan_per_coarse = int(n_chan / n_coarse_chan)
+
+        mid_chan = int(n_chan_per_coarse / 2)
+
+        for ii in range(n_coarse_chan):
             ss = ii*n_chan_per_coarse
-            self.data[..., ss+mid_chan-1] = self.data[..., ss+mid_chan]
+            self.data[..., ss+mid_chan] = np.median(self.data[..., ss+mid_chan+5:ss+mid_chan+10])
 
     def info(self):
         """ Print header information """
@@ -438,8 +452,8 @@ class Filterbank(object):
         foff = self.header[b'foff']
 
         #convert input frequencies into what their corresponding index would be
-        i_start = (f_start - fch1) / foff
-        i_stop  = (f_stop - fch1)  / foff
+        i_start = int((f_start - fch1) / foff)
+        i_stop  = int((f_stop - fch1)  / foff)
 
         #calculate closest true index value
         chan_start_idx = np.int(i_start)
@@ -450,9 +464,9 @@ class Filterbank(object):
 
         freqs = foff * i_vals + fch1
 
-        return freqs[::-1]
+        return freqs
 
-    def grab_data(self, f_start=None, f_stop=None,t_start=None, t_stop=None, if_id=0):
+    def grab_data(self, f_start=None, f_stop=None, t_start=None, t_stop=None, if_id=0):
         """ Extract a portion of data by frequency range.
 
         Args:
@@ -463,33 +477,40 @@ class Filterbank(object):
         Returns:
             (freqs, data) (np.arrays): frequency axis in MHz and data subset
         """
-        i_start, i_stop = 0, None
 
-        if f_start:
-            i_start = closest(self.freqs, f_start)
-        if f_stop:
-            i_stop = closest(self.freqs, f_stop)
+        if f_start is None:
+            f_start = self.freqs[0]
+        if f_stop is None:
+            f_stop = self.freqs[-1]
 
-        plot_f    = self.freqs[i_start:i_stop]
-        plot_data = self.data[:, if_id, i_start:i_stop]
+        i0 = np.argmin(np.abs(self.freqs - f_start))
+        i1 = np.argmin(np.abs(self.freqs - f_stop))
+
+        if i0 < i1:
+            plot_f    = self.freqs[i0:i1 + 1]
+            plot_data = np.squeeze(self.data[t_start:t_stop, ..., i0:i1 + 1])
+        else:
+            plot_f    = self.freqs[i1:i0 + 1]
+            plot_data = np.squeeze(self.data[t_start:t_stop, ..., i1:i0 + 1])
+
         return plot_f, plot_data
 
-    def calc_n_coarse_chan(self):
-        """ This makes an attempt to calculate the number of coarse channels in a given file.
-            It assumes for now that a single coarse channel is 2.9296875 MHz
+    def _calc_extent(self,plot_f=None,plot_t=None,MJD_time=False):
+        """ Setup ploting edges.
         """
 
-        # Could add a telescope based coarse channel bandwidth, or other discriminative.
-        # if telescope_id == 'GBT':
-        # or actually as is currently
-        # if self.header['telescope_id'] == 6:
+        plot_f_begin = plot_f[0]
+        plot_f_end = plot_f[-1] + (plot_f[1]-plot_f[0])
 
-        coarse_chan_bw = 2.9296875
+        plot_t_begin = self.timestamps[0]
+        plot_t_end  = self.timestamps[-1] + (self.timestamps[1] - self.timestamps[0])
 
-        bandwidth = abs(self.header[b'nchans']*self.header[b'foff'])
-        n_coarse_chan = int(bandwidth / coarse_chan_bw)
+        if MJD_time:
+            extent=(plot_f_begin, plot_f_begin_end, plot_t_begin, plot_t_end)
+        else:
+            extent=(plot_f_begin, plot_f_end, 0.0,(plot_t_end-plot_t_begin)*24.*60.*60)
 
-        return max(n_coarse_chan, 1)
+        return extent
 
     def plot_spectrum(self, t=0, f_start=None, f_stop=None, logged=False, if_id=0, c=None, **kwargs):
         """ Plot frequency spectrum of a given file
@@ -501,26 +522,35 @@ class Filterbank(object):
             c: color for line
             kwargs: keyword args to be passed to matplotlib plot()
         """
-        if self.header['nbits'] <=2:
+        if self.header[b'nbits'] <=2:
             logged = False
             t='all'
         ax = plt.gca()
 
         plot_f, plot_data = self.grab_data(f_start, f_stop, if_id)
 
+        #Using accending frequency for all plots.
+        if self.header[b'foff'] < 0:
+            plot_data = plot_data[..., ::-1] # Reverse data
+            plot_f = plot_f[::-1]
+
         if isinstance(t, int):
             print("extracting integration %i..." % t)
             plot_data = plot_data[t]
         elif t == b'all':
             print("averaging along time axis...")
-            plot_data = plot_data.mean(axis=0)
+            #Since the data has been squeezed, the axis for time goes away if only one bin, causing a bug with axis=1
+            if len(plot_data.shape) > 1:
+                plot_data = plot_data.mean(axis=0)
+            else:
+                plot_data = plot_data.mean()
         else:
             raise RuntimeError("Unknown integration %s" % t)
 
         # Rebin to max number of points
         dec_fac_x = 1
         if plot_data.shape[0] > MAX_PLT_POINTS:
-            dec_fac_x = plot_data.shape[0] / MAX_PLT_POINTS
+            dec_fac_x = int(plot_data.shape[0] / MAX_PLT_POINTS)
 
         plot_data = rebin(plot_data, dec_fac_x, 1)
         plot_f    = rebin(plot_f, dec_fac_x, 1)
@@ -543,7 +573,6 @@ class Filterbank(object):
         except KeyError:
             plt.title(self.filename)
 
-        ax.get_xaxis().get_major_formatter().set_useOffset(False)
         plt.xlim(plot_f[0], plot_f[-1])
 
     def plot_spectrum_min_max(self, t=0, f_start=None, f_stop=None, logged=False, if_id=0, c=None, **kwargs):
@@ -559,19 +588,31 @@ class Filterbank(object):
 
         plot_f, plot_data = self.grab_data(f_start, f_stop, if_id)
 
+        #Using accending frequency for all plots.
+        if self.header[b'foff'] < 0:
+            plot_data = plot_data[..., ::-1] # Reverse data
+            plot_f = plot_f[::-1]
+
         fig_max = plot_data[0].max()
         fig_min = plot_data[0].min()
 
         print("averaging along time axis...")
-        plot_max = plot_data.max(axis=0)
-        plot_min = plot_data.min(axis=0)
-        plot_data = plot_data.mean(axis=0)
+
+        #Since the data has been squeezed, the axis for time goes away if only one bin, causing a bug with axis=1
+        if len(plot_data.shape) > 1:
+            plot_max = plot_data.max(axis=0)
+            plot_min = plot_data.min(axis=0)
+            plot_data = plot_data.mean(axis=0)
+        else:
+            plot_max = plot_data.max()
+            plot_min = plot_data.min()
+            plot_data = plot_data.mean()
 
         # Rebin to max number of points
         dec_fac_x = 1
         MAX_PLT_POINTS = 8*64  # Low resoluition to see the difference.
         if plot_data.shape[0] > MAX_PLT_POINTS:
-            dec_fac_x = plot_data.shape[0] / MAX_PLT_POINTS
+            dec_fac_x = int(plot_data.shape[0] / MAX_PLT_POINTS)
 
         plot_data = rebin(plot_data, dec_fac_x, 1)
         plot_min = rebin(plot_min, dec_fac_x, 1)
@@ -596,12 +637,11 @@ class Filterbank(object):
         except KeyError:
             plt.title(self.filename)
 
-        ax.get_xaxis().get_major_formatter().set_useOffset(False)
         plt.xlim(plot_f[0], plot_f[-1])
         if logged:
             plt.ylim(db(fig_min),db(fig_max))
 
-    def plot_waterfall(self, f_start=None, f_stop=None, if_id=0, logged=True,cb=True,MJD_time=False, **kwargs):
+    def plot_waterfall(self, f_start=None, f_stop=None, if_id=0, logged=True, cb=True, MJD_time=False, **kwargs):
         """ Plot waterfall of data
 
         Args:
@@ -611,7 +651,13 @@ class Filterbank(object):
             cb (bool): for plotting the colorbar
             kwargs: keyword args to be passed to matplotlib imshow()
         """
+
         plot_f, plot_data = self.grab_data(f_start, f_stop, if_id)
+
+        #Using accending frequency for all plots.
+        if self.header[b'foff'] < 0:
+            plot_data = plot_data[..., ::-1] # Reverse data
+            plot_f = plot_f[::-1]
 
         if logged:
             plot_data = db(plot_data)
@@ -619,10 +665,10 @@ class Filterbank(object):
         # Make sure waterfall plot is under 4k*4k
         dec_fac_x, dec_fac_y = 1, 1
         if plot_data.shape[0] > MAX_IMSHOW_POINTS[0]:
-            dec_fac_x = plot_data.shape[0] / MAX_IMSHOW_POINTS[0]
+            dec_fac_x = int(plot_data.shape[0] / MAX_IMSHOW_POINTS[0])
 
         if plot_data.shape[1] > MAX_IMSHOW_POINTS[1]:
-            dec_fac_y =  plot_data.shape[1] /  MAX_IMSHOW_POINTS[1]
+            dec_fac_y =  int(plot_data.shape[1] /  MAX_IMSHOW_POINTS[1])
 
         plot_data = rebin(plot_data, dec_fac_x, dec_fac_y)
 
@@ -631,13 +677,11 @@ class Filterbank(object):
         except KeyError:
             plt.title(self.filename)
 
-        if MJD_time:
-            extent=(plot_f[0], plot_f[-1], self.timestamps[-1], self.timestamps[0])
-        else:
-            extent=(plot_f[0], plot_f[-1], (self.timestamps[-1]-self.timestamps[0])*24.*60.*60, 0.0)
+        extent = self._calc_extent(plot_f=plot_f,plot_t=self.timestamps,MJD_time=MJD_time)
 
         plt.imshow(plot_data,
             aspect='auto',
+            origin='lower',
             rasterized=True,
             interpolation='nearest',
             extent=extent,
@@ -652,7 +696,7 @@ class Filterbank(object):
         else:
             plt.ylabel("Time [s]")
 
-    def plot_time_series(self, f_start=None, f_stop=None, if_id=0, logged=True, orientation=None , **kwargs):
+    def plot_time_series(self, f_start=None, f_stop=None, if_id=0, logged=True, orientation=None, MJD_time=False, **kwargs):
         """ Plot the time series.
 
          Args:
@@ -665,19 +709,36 @@ class Filterbank(object):
         ax = plt.gca()
         plot_f, plot_data = self.grab_data(f_start, f_stop, if_id)
 
-        if logged:
+        if logged and self.header[b'nbits'] >= 8:
             plot_data = db(plot_data)
 
-        plot_data = plot_data.mean(axis=1)
-
-        if 'v' in orientation:
-            plt.plot(plot_data,range(len(plot_data))[::-1], **kwargs)
+        #Since the data has been squeezed, the axis for time goes away if only one bin, causing a bug with axis=1
+        if len(plot_data.shape) > 1:
+            plot_data = plot_data.mean(axis=1)
         else:
-            plt.plot(plot_data, **kwargs)
-            plt.xlabel("Time [s]")
+            plot_data = plot_data.mean()
+
+        #Make proper time axis for plotting (but only for plotting!). Note that this makes the values inclusive.
+        extent = self._calc_extent(plot_f=plot_f,plot_t=self.timestamps,MJD_time=MJD_time)
+        plot_t = np.linspace(extent[2],extent[3],len(self.timestamps))
+
+        if MJD_time:
+            xlabel = "Time [MJD]"
+        else:
+            xlabel = "Time [s]"
+
+        # Reverse oder if vertical orientation.
+        if orientation is not None:
+            if 'v' in orientation:
+                plt.plot(plot_data, plot_t[::-1], **kwargs)
+            else:
+                plt.plot(plot_t, plot_data, **kwargs)
+                plt.xlabel(xlabel)
+        else:
+            plt.plot(plot_t, plot_data, **kwargs)
+            plt.xlabel(xlabel)
 
         ax.autoscale(axis='both',tight=True)
-        ax.get_xaxis().get_major_formatter().set_useOffset(False)
 
     def plot_kurtosis(self, f_start=None, f_stop=None, if_id=0, **kwargs):
         """ Plot kurtosis
@@ -691,6 +752,11 @@ class Filterbank(object):
 
         plot_f, plot_data = self.grab_data(f_start, f_stop, if_id)
 
+        #Using accending frequency for all plots.
+        if self.header[b'foff'] < 0:
+            plot_data = plot_data[..., ::-1] # Reverse data
+            plot_f = plot_f[::-1]
+
         try:
             plot_kurtosis = scipy.stats.kurtosis(plot_data, axis=0, nan_policy='omit')
         except:
@@ -700,7 +766,6 @@ class Filterbank(object):
         plt.ylabel("Kurtosis")
         plt.xlabel("Frequency [MHz]")
 
-        ax.get_xaxis().get_major_formatter().set_useOffset(False)
         plt.xlim(plot_f[0], plot_f[-1])
 
     def plot_all(self, t=0, f_start=None, f_stop=None, logged=False, if_id=0, kutosis=True, **kwargs):
@@ -715,9 +780,8 @@ class Filterbank(object):
             if_id (int): IF identification (if multiple IF signals in file)
             kwargs: keyword args to be passed to matplotlib plot() and imshow()
         """
-        if self.header['nbits'] <=2:
+        if self.header[b'nbits'] <=2:
             logged = False
-        plot_f, plot_data = self.grab_data(f_start, f_stop, if_id)
 
         nullfmt = NullFormatter()  # no labels
 
@@ -834,7 +898,7 @@ class Filterbank(object):
 
         plt.text(0.05, .95, plot_header, ha='left', va='top', wrap=True)
 
-        axHeader.set_axis_bgcolor('white')
+        axHeader.set_facecolor('white')
         axHeader.xaxis.set_major_formatter(nullfmt)
         axHeader.yaxis.set_major_formatter(nullfmt)
 
@@ -845,24 +909,18 @@ class Filterbank(object):
             filename_out (str): Name of output file
         """
 
-        # calibrate data
-        # self.data = calibrate(mask(self.data.mean(axis=0)[0]))
-        # rewrite header to be consistent with modified data
-        self.header[b'fch1']   = self.freqs[0]
-        self.header[b'foff']   = self.freqs[1] - self.freqs[0]
-        self.header[b'nchans'] = self.freqs.shape[0]
-        # self.header['tsamp']  = self.data.shape[0] * self.header['tsamp']
+        print("[Filterbank] Warning: Non-standard function to write in filterbank (.fil) format. Please use Waterfall.")
 
-        n_bytes  = self.header[b'nbits'] / 8
-        with open(filename_out, "w") as fileh:
+        n_bytes  = int(self.header[b'nbits'] / 8)
+        with open(filename_out, "wb") as fileh:
             fileh.write(generate_sigproc_header(self))
             j = self.data
             if n_bytes == 4:
-                np.float32(j[:, ::-1].ravel()).tofile(fileh)
+                np.float32(j.ravel()).tofile(fileh)
             elif n_bytes == 2:
-                np.int16(j[:, ::-1].ravel()).tofile(fileh)
+                np.int16(j.ravel()).tofile(fileh)
             elif n_bytes == 1:
-                np.int8(j[:, ::-1].ravel()).tofile(fileh)
+                np.int8(j.ravel()).tofile(fileh)
 
     def write_to_hdf5(self, filename_out, *args, **kwargs):
         """ Write data to HDF5 file.
@@ -870,6 +928,9 @@ class Filterbank(object):
         Args:
             filename_out (str): Name of output file
         """
+
+        print("[Filterbank] Warning: Non-standard function to write in HDF5 (.h5) format. Please use Waterfall.")
+
         if not HAS_HDF5:
             raise RuntimeError("h5py package required for HDF5 output.")
 
@@ -896,7 +957,6 @@ class Filterbank(object):
             for key, value in self.header.items():
                 dset.attrs[key] = value
 
-
     def calibrate_band_pass_N1(self):
         """ One way to calibrate the band pass is to take the median value
             for every frequency fine channel, and divide by it.
@@ -914,8 +974,9 @@ def cmd_tool(args=None):
     parser = ArgumentParser(description="Command line utility for reading and plotting filterbank files.")
 
     parser.add_argument('-p', action='store',  default='a', dest='what_to_plot', type=str,
-                        help='Show: "w" waterfall (freq vs. time) plot; "s" integrated spectrum plot, \
-                             "a" for all available plots and information; and more.')
+                        help='Show: "w" waterfall (freq vs. time) plot; "s" integrated spectrum plot; \
+                        "t" for time series; "mm" for spectrum including min max; "k" for kurtosis; \
+                        "a" for all available plots and information; and "ank" for all but kurtosis.')
     parser.add_argument('filename', type=str,
                         help='Name of file to read')
     parser.add_argument('-b', action='store', default=None, dest='f_start', type=float,
@@ -959,11 +1020,11 @@ def cmd_tool(args=None):
     else:
         t_start = args.t_start
         t_stop  = args.t_stop
-    
+
     if args.info_only:
         args.blank_dc = False
         args.calibrate_band_pass = False
-        
+
     fil = Filterbank(filename, f_start=args.f_start, f_stop=args.f_stop,
                      t_start=t_start, t_stop=t_stop,
                      load_data=load_data,blank_dc=args.blank_dc,
@@ -1000,7 +1061,7 @@ def cmd_tool(args=None):
             fil.plot_kurtosis(f_start=args.f_start, f_stop=args.f_stop)
         elif args.what_to_plot == "t":
             plt.figure("Time Series", figsize=(8, 6))
-            fil.plot_time_series(f_start=args.f_start, f_stop=args.f_stop)
+            fil.plot_time_series(f_start=args.f_start, f_stop=args.f_stop,orientation='h')
         elif args.what_to_plot == "a":
             plt.figure("Multiple diagnostic plots", figsize=(12, 9),facecolor='white')
             fil.plot_all(logged=True, f_start=args.f_start, f_stop=args.f_stop, t='all')
