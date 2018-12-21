@@ -25,14 +25,9 @@ import os
 import sys
 import time
 
-try:
-    from .filterbank import Filterbank
-    from . import file_wrapper as fw
-    from .sigproc import *
-except:
-    from filterbank import Filterbank
-    import file_wrapper as fw
-    from sigproc import *
+from blimpy.filterbank import Filterbank
+from blimpy import file_wrapper as fw
+from blimpy.sigproc import *
 
 try:
     import h5py
@@ -110,7 +105,7 @@ class Waterfall(Filterbank):
             t_start (int): start integration ID
             t_stop (int): stop integration ID
             load_data (bool): load data. If set to False, only header will be read.
-            max_load (float): maximum data to load in GB. Default: 1GB. 
+            max_load (float): maximum data to load in GB. Default: 1GB.
                               e.g. 0.1 is 100 MB
             header_dict (dict): Create blimpy from header dictionary + data array
             data_array (np.array): Create blimpy from header dict + data array
@@ -464,7 +459,7 @@ class Waterfall(Filterbank):
             freq_axis_size = self.selection_shape[self.freq_axis]
             time_axis_size = np.min([chunk_dim[self.time_axis] * MAX_BLOB_MB * chunk_dim[self.freq_axis] / freq_axis_size, self.selection_shape[self.time_axis]])
 
-        blob_dim = (time_axis_size, 1, freq_axis_size)
+        blob_dim = (int(time_axis_size), 1, freq_axis_size)
 
         return blob_dim
 
@@ -493,12 +488,12 @@ class Waterfall(Filterbank):
             chunk_dim = (1,1,512)
             return chunk_dim
 
-    def calc_n_coarse_chan(self):
+    def calc_n_coarse_chan(self, chan_bw=None):
         """ This makes an attempt to calculate the number of coarse channels in a given freq selection.
             It assumes for now that a single coarse channel is 2.9296875 MHz
         """
 
-        n_coarse_chan = self.container.calc_n_coarse_chan()
+        n_coarse_chan = self.container.calc_n_coarse_chan(chan_bw)
 
         return n_coarse_chan
 
@@ -575,7 +570,11 @@ def cmd_tool(args=None):
                         help='Filename output (if not probided, the name will be the same but with apropiate extension).')
     parser.add_argument('-l', action='store', default=None, dest='max_load', type=float,
                         help='Maximum data limit to load. Default:1GB')
-    parse_args = parser.parse_args()
+
+    if args is None:
+        args = sys.argv[1:]
+
+    parse_args = parser.parse_args(args)
 
     # Open blimpy data
     filename = parse_args.filename

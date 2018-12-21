@@ -696,7 +696,7 @@ class Filterbank(object):
         else:
             plt.ylabel("Time [s]")
 
-    def plot_time_series(self, f_start=None, f_stop=None, if_id=0, logged=True, orientation=None, MJD_time=False, **kwargs):
+    def plot_time_series(self, f_start=None, f_stop=None, if_id=0, logged=True, orientation='h', MJD_time=False, **kwargs):
         """ Plot the time series.
 
          Args:
@@ -723,20 +723,24 @@ class Filterbank(object):
         plot_t = np.linspace(extent[2],extent[3],len(self.timestamps))
 
         if MJD_time:
-            xlabel = "Time [MJD]"
+            tlabel = "Time [MJD]"
         else:
-            xlabel = "Time [s]"
+            tlabel = "Time [s]"
+
+        if logged:
+            plabel = "Power [dB]"
+        else:
+            plabel = "Power [counts]"
 
         # Reverse oder if vertical orientation.
-        if orientation is not None:
-            if 'v' in orientation:
-                plt.plot(plot_data, plot_t[::-1], **kwargs)
-            else:
-                plt.plot(plot_t, plot_data, **kwargs)
-                plt.xlabel(xlabel)
+        if 'v' in orientation:
+            plt.plot(plot_data, plot_t, **kwargs)
+            plt.xlabel(plabel)
+
         else:
             plt.plot(plot_t, plot_data, **kwargs)
-            plt.xlabel(xlabel)
+            plt.xlabel(tlabel)
+            plt.ylabel(plabel)
 
         ax.autoscale(axis='both',tight=True)
 
@@ -768,7 +772,7 @@ class Filterbank(object):
 
         plt.xlim(plot_f[0], plot_f[-1])
 
-    def plot_all(self, t=0, f_start=None, f_stop=None, logged=False, if_id=0, kutosis=True, **kwargs):
+    def plot_all(self, t=0, f_start=None, f_stop=None, logged=False, if_id=0, kurtosis=True, **kwargs):
         """ Plot waterfall of data as well as spectrum; also, placeholder to make even more complicated plots in the future.
 
         Args:
@@ -801,15 +805,6 @@ class Filterbank(object):
         rect_header = [left3 - .05, bottom, 0.2, height]
 
         # --------
-        axWaterfall = plt.axes(rect_waterfall)
-        print('Plotting Waterfall')
-        self.plot_waterfall(f_start=f_start, f_stop=f_stop, logged=logged, cb=False)
-        plt.xlabel('')
-
-        # no labels
-        axWaterfall.xaxis.set_major_formatter(nullfmt)
-
-        # --------
         #         axColorbar = plt.axes(rect_colorbar)
         #         print 'Ploting Colorbar'
         #         print plot_data.max()
@@ -826,29 +821,6 @@ class Filterbank(object):
         #         heatmap = axColorbar.pcolor(plot_data, edgecolors = 'none', picker=True)
         #         plt.colorbar(heatmap, cax = axColorbar)
 
-        # --------
-        axSpectrum = plt.axes(rect_spectrum)
-        print('Plotting Spectrum')
-        self.plot_spectrum(logged=logged, f_start=f_start, f_stop=f_stop, t=t)
-        plt.title('')
-        axSpectrum.yaxis.tick_right()
-        axSpectrum.yaxis.set_label_position("right")
-        plt.xlabel('')
-        axSpectrum.xaxis.set_major_formatter(nullfmt)
-
-        # --------
-        axTimeseries = plt.axes(rect_timeseries)
-        print('Plotting Timeseries')
-        self.plot_time_series(f_start=f_start, f_stop=f_stop, orientation='v')
-        axTimeseries.yaxis.set_major_formatter(nullfmt)
-        axTimeseries.xaxis.set_major_formatter(nullfmt)
-
-        # --------
-        # Could exclude since it takes much longer to run than the other plots.
-        if kutosis:
-            axKurtosis = plt.axes(rect_kurtosis)
-            print('Plotting Kurtosis')
-            self.plot_kurtosis(f_start=f_start, f_stop=f_stop)
 
         # --------
         axMinMax = plt.axes(rect_min_max)
@@ -857,6 +829,42 @@ class Filterbank(object):
         plt.title('')
         axMinMax.yaxis.tick_right()
         axMinMax.yaxis.set_label_position("right")
+
+        # --------
+        axSpectrum = plt.axes(rect_spectrum,sharex=axMinMax)
+        print('Plotting Spectrum')
+        self.plot_spectrum(logged=logged, f_start=f_start, f_stop=f_stop, t=t)
+        plt.title('')
+        axSpectrum.yaxis.tick_right()
+        axSpectrum.yaxis.set_label_position("right")
+        plt.xlabel('')
+#        axSpectrum.xaxis.set_major_formatter(nullfmt)
+        plt.setp(axSpectrum.get_xticklabels(), visible=False)
+
+        # --------
+        axWaterfall = plt.axes(rect_waterfall,sharex=axMinMax)
+        print('Plotting Waterfall')
+        self.plot_waterfall(f_start=f_start, f_stop=f_stop, logged=logged, cb=False)
+        plt.xlabel('')
+
+        # no labels
+#        axWaterfall.xaxis.set_major_formatter(nullfmt)
+        plt.setp(axWaterfall.get_xticklabels(), visible=False)
+
+        # --------
+        axTimeseries = plt.axes(rect_timeseries)
+        print('Plotting Timeseries')
+        self.plot_time_series(f_start=f_start, f_stop=f_stop, orientation='v')
+        axTimeseries.yaxis.set_major_formatter(nullfmt)
+#        axTimeseries.xaxis.set_major_formatter(nullfmt)
+
+        # --------
+        # Could exclude since it takes much longer to run than the other plots.
+        if kurtosis:
+            axKurtosis = plt.axes(rect_kurtosis)
+            print('Plotting Kurtosis')
+            self.plot_kurtosis(f_start=f_start, f_stop=f_stop)
+
 
         # --------
         axHeader = plt.axes(rect_header)
@@ -973,7 +981,7 @@ def cmd_tool(args=None):
 
     parser = ArgumentParser(description="Command line utility for reading and plotting filterbank files.")
 
-    parser.add_argument('-p', action='store',  default='a', dest='what_to_plot', type=str,
+    parser.add_argument('-p', action='store',  default='ank', dest='what_to_plot', type=str,
                         help='Show: "w" waterfall (freq vs. time) plot; "s" integrated spectrum plot; \
                         "t" for time series; "mm" for spectrum including min max; "k" for kurtosis; \
                         "a" for all available plots and information; and "ank" for all but kurtosis.')
@@ -1067,7 +1075,7 @@ def cmd_tool(args=None):
             fil.plot_all(logged=True, f_start=args.f_start, f_stop=args.f_stop, t='all')
         elif args.what_to_plot == "ank":
             plt.figure("Multiple diagnostic plots", figsize=(12, 9),facecolor='white')
-            fil.plot_all(logged=True, f_start=args.f_start, f_stop=args.f_stop, t='all',kutosis=False)
+            fil.plot_all(logged=True, f_start=args.f_start, f_stop=args.f_stop, t='all',kurtosis=False)
 
         if args.plt_filename != '':
             plt.savefig(args.plt_filename)

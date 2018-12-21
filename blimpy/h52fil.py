@@ -7,7 +7,11 @@
     July 28th 2017
 '''
 
-from .waterfall import Waterfall
+try:
+    from .waterfall import Waterfall
+except:
+    from waterfall import Waterfall
+
 from optparse import OptionParser
 import sys
 import os
@@ -30,14 +34,17 @@ logging.basicConfig(format=format,stream=stream,level = level_log)
 #------
 
 
-
-def make_fil_file(filename,out_dir='./', new_filename=None):
+def make_fil_file(filename,out_dir='./', new_filename=None, max_load = None):
     ''' Converts file to Sigproc filterbank (.fil) format.  Default saves output in current dir.
     '''
 
-    fil_file = Waterfall(filename)
+    fil_file = Waterfall(filename, max_load = max_load)
     if not new_filename:
         new_filename = out_dir+filename.replace('.h5','.fil').split('/')[-1]
+
+    if '.fil' not in new_filename:
+        new_filename = new_filename+'.fil'
+
     fil_file.write_to_fil(new_filename)
 
 def cmd_tool():
@@ -49,6 +56,8 @@ def cmd_tool():
     p.add_option('-o', '--out_dir', dest='out_dir', type='str', default='./', help='Location for output files. Default: local dir. ')
     p.add_option('-n', '--new_filename', dest='new_filename', type='str', default='', help='New filename. Default: replaces extention to .fil')
     p.add_option('-d', '--delete_input', dest='delete_input', action='store_true', default=False, help='This option deletes the input file after conversion.')
+    p.add_option('-l', action='store', default=None, dest='max_load', type=float,help='Maximum data limit to load. Default:1GB')
+
     opts, args = p.parse_args(sys.argv[1:])
 
     if len(args)!=1:
@@ -57,12 +66,11 @@ def cmd_tool():
     else:
         filename = args[0]
 
-    make_fil_file(filename, out_dir = opts.out_dir, new_filename=opts.new_filename)
+    make_fil_file(filename, out_dir = opts.out_dir, new_filename=opts.new_filename, max_load = opts.max_load)
 
     if opts.delete_input:
         logger.info("'Deleting input file: %s"%(filename))
         os.remove(filename)
-
 
 if __name__ == "__main__":
 
