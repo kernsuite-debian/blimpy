@@ -20,6 +20,8 @@ Build-Depends: debhelper (>=9),
  python-h5py,
  python-slalib,
  python3-slalib,
+ python-pytest-runner,
+ python3-pytest-runner
  gcc
 Standards-Version: 3.9.8
 Homepage: https://github.com/UCBerkeleySETI/blimpy
